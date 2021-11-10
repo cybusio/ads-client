@@ -42,19 +42,19 @@ const debugIO = require('debug')(`${PACKAGE_NAME}:raw-data`)
 
 /**
  * Unofficial Node.js library for connecting to Beckhoff TwinCAT automation systems using ADS protocol
- * 
+ *
  * This library is not related to Beckhoff in any way.
  */
 class Client extends EventEmitter {
 
   /**
    * @typedef Settings
-   * 
+   *
    * NOTE: When adding/removing, update method defaultSettings()
-   * 
+   *
    * @property {string} targetAmsNetId - Target system AmsNetId, use '127.0.0.1.1.1' if connecting to a local system
    * @property {number} targetAdsPort - Target system ADS port, TwinCAT 3: 851 (1st runtime), 852 (2nd runtime) and so on
-   * 
+   *
    * @property {boolean} [objectifyEnumerations=true] - If true, read ENUM data types are converted to objects instead of numbers, e.g. {name: 'enumValue', value: 5} instead of 5 - (**default**: true)
    * @property {boolean} [convertDatesToJavascript=true] - If true, PLC DT (DATE_AND_TIME) and DATE types are converted to Javascript dates - Optional (**default**: true)
    * @property {boolean} [readAndCacheSymbols=false] - If true, all PLC symbols are cached during connecting. Otherwise they are read and cached only when needed - Optional (**default**: false)
@@ -74,12 +74,13 @@ class Client extends EventEmitter {
    * @property {number} [connectionDownDelay=5000] - Time (milliseconds) after no successful reading of the system manager state the connection is determined to be lost - Optional (**default**: 5000 ms)
    * @property {boolean} [allowHalfOpen=false] - If true, connect() is successful even if no PLC runtime is found (but target and system manager are available) - Can be useful if it's ok that after connect() the PLC runtime is not immediately available (example: connecting before uploading PLC code and reading data later) - WARNING: If true, reinitializing subscriptions might fail after connection loss.
    * @property {boolean} [disableBigInt=false] - If true, 64 bit integer PLC variables are kept as Buffer objects instead of converting to Javascript BigInt variables (JSON.strigify and libraries that use it have no BigInt support)
+   * @property {boolean} [disableSystemManager=true] - If true, System manager support is disabled - Optional (**default**: true)
    */
 
 
   /**
    * Default settings
-   * 
+   *
    * @returns {Settings} Default settings
    */
   static defaultSettings() {
@@ -102,7 +103,8 @@ class Client extends EventEmitter {
       checkStateInterval: 1000,
       connectionDownDelay: 5000,
       allowHalfOpen: false,
-      disableBigInt: false
+      disableBigInt: false,
+      disableSystemManager: true
     }
   }
 
@@ -113,9 +115,9 @@ class Client extends EventEmitter {
 
   /**
    * Constructor for Client
-   * 
+   *
    * @param {Settings} settings - ADS Client settings as an object, see datatype **Settings** for setting descriptions
-   * 
+   *
    * @throws {ClientException} If required settings are missing, an error is thrown
    */
   constructor(settings) {
@@ -145,7 +147,7 @@ class Client extends EventEmitter {
 
     /**
      * Internal variables - Not intended for external use
-     * 
+     *
      * @readonly
      */
     this._internals = {
@@ -173,7 +175,7 @@ class Client extends EventEmitter {
 
 
     /**
-     * 
+     *
      * @typedef Metadata
      * @property {object} deviceInfo - Target device info (read after connecting)
      * @property {object} systemManagerState - Target device system manager state (run, config, etc.)
@@ -194,7 +196,7 @@ class Client extends EventEmitter {
      */
     this.metaData = {
       deviceInfo: null,
-      systemManagerState: null,
+      systemManagerState: {},
       plcRuntimeState: null,
       uploadInfo: null,
       symbolVersion: null,
@@ -207,15 +209,15 @@ class Client extends EventEmitter {
 
 
     /**
-     * 
+     *
      * @typedef Connection
-     * @property {boolean} connected - True if target is connected 
+     * @property {boolean} connected - True if target is connected
      * @property {boolean} isLocal - True if target is local runtime / loopback connection
      * @property {string} localAmsNetId - Local system AmsNetId
      * @property {number} localAdsPort - Local system ADS port
      * @property {string} targetAmsNetId - Target system AmsNetId
      * @property {number} targetAdsPort - Target system ADS port
-     * 
+     *
      */
 
     /**
@@ -241,14 +243,14 @@ class Client extends EventEmitter {
 
 
   /**
-   * Sets debugging using debug package on/off. 
+   * Sets debugging using debug package on/off.
    * Another way for environment variable DEBUG:
    *  - 0 = no debugging
    *  - 1 = Extended exception stack trace
    *  - 2 = basic debugging (same as $env:DEBUG='ads-client')
    *  - 3 = detailed debugging (same as $env:DEBUG='ads-client,ads-client:details')
    *  - 4 = full debugging (same as $env:DEBUG='ads-client,ads-client:details,ads-client:raw-data')
-   * 
+   *
    * @param {number} level 0 = none, 1 = extended stack traces, 2 = basic, 3 = detailed, 4 = detailed + raw data
    */
   setDebugging(level) {
@@ -284,7 +286,7 @@ class Client extends EventEmitter {
 
   /**
    * Connects to the target system using pre-defined Client::settings (at constructor or manually given)
-   * 
+   *
    * @returns {Promise} Returns a promise (async function)
    * - If resolved, client is connected successfully and connection info is returned (object)
    * - If rejected, something went wrong and error info is returned (object)
@@ -417,22 +419,25 @@ class Client extends EventEmitter {
         this._internals.socketErrorHandler = _onSocketError.bind(this)
         socket.on('error', this._internals.socketErrorHandler)
 
-        try {
-          //Try to read system manager state - If it's OK, connection is successful to the target
-          await this.readSystemManagerState()
-          _systemManagerStatePoller.call(this)
-
-        } catch (err) {
+        if (this.settings.disableSystemManager)
+          debug(`connect(): System manager support is disabled. Not trying to connect to it.`)
+        else {
           try {
-            await this.disconnect()
+            //Try to read system manager state - If it's OK, connection is successful to the target
+            await this.readSystemManagerState()
+            _systemManagerStatePoller.call(this)
+
           } catch (err) {
-            debug(`connect(): Reading target system manager failed -> Connection closed`)
+            try {
+              await this.disconnect()
+            } catch (err) {
+              debug(`connect(): Reading target system manager failed -> Connection closed`)
+            }
+            this.connection.connected = false
+
+            return reject(new ClientException(this, 'connect()', `Connection failed: ${err.message}`, err))
           }
-          this.connection.connected = false
-
-          return reject(new ClientException(this, 'connect()', `Connection failed: ${err.message}`, err))
         }
-
 
         try {
           await _reInitializeInternals.call(this)
@@ -501,13 +506,13 @@ class Client extends EventEmitter {
 
 
   /**
-   * Unsubscribes all notifications, unregisters ADS port from router (if it was registered) 
-   * and disconnects target system and ADS router 
-   * 
-   * @param {boolean} [forceDisconnect] - If true, the connection is dropped immediately (default = false)  
-   * 
+   * Unsubscribes all notifications, unregisters ADS port from router (if it was registered)
+   * and disconnects target system and ADS router
+   *
+   * @param {boolean} [forceDisconnect] - If true, the connection is dropped immediately (default = false)
+   *
    * @returns {Promise} Returns a promise (async function)
-   * - If resolved, disconnect was successful 
+   * - If resolved, disconnect was successful
    * - If rejected, connection is still closed but something went wrong during disconnecting and error info is returned
    */
   disconnect(forceDisconnect = false) {
@@ -612,9 +617,9 @@ class Client extends EventEmitter {
 
   /**
    * Disconnects and reconnects again. At the moment does NOT reinitialize subscriptions, everything is lost
-   * 
-   * @param {boolean} [forceDisconnect] - If true, the connection is dropped immediately (default = false)  
-   * 
+   *
+   * @param {boolean} [forceDisconnect] - If true, the connection is dropped immediately (default = false)
+   *
    * @returns {Promise} Returns a promise (async function)
    * - If resolved, connection to PLC runtime is successful
    * - If rejected, connection to PLC runtime failed
@@ -660,7 +665,7 @@ class Client extends EventEmitter {
 
   /**
      * Reads target device information and also saves it to the Client::metaData.deviceInfo object
-     * 
+     *
      * @returns {Promise<object>} Returns a promise (async function)
      * - If resolved, device information is returned (object)
      * - If rejected, reading failed and error info is returned (object)
@@ -692,7 +697,7 @@ class Client extends EventEmitter {
   /**
     * Reads target device system status (run/config/etc)
     * Uses ADS port 10000, which is system manager
-    * 
+    *
     * @returns {Promise<object>} Returns a promise (async function)
     * - If resolved, system status is returned (object)
     * - If rejected, reading failed and error info is returned (object)
@@ -726,7 +731,7 @@ class Client extends EventEmitter {
 
   /**
     * Reads target device status and also saves it to the metaData.plcRuntimeStatus
-    * 
+    *
     * @returns {Promise<object>} Returns a promise (async function)
     * - If resolved, device status is returned (object)
     * - If rejected, reading failed and error info is returned (object)
@@ -763,7 +768,7 @@ class Client extends EventEmitter {
 
   /**
     * Reads target device PLC software symbol version and also saves it to the Client::metaData.symbolVersion
-    * 
+    *
     * @returns {Promise<number>} Returns a promise (async function)
     * - If resolved, symbol version number is returned (number)
     * - If rejected, reading failed and error info is returned (object)
@@ -799,7 +804,7 @@ class Client extends EventEmitter {
 
   /**
     * Reads target device PLC upload info and also saves it to the Client::metaData.uploadInfo
-    * 
+    *
     * @returns {Promise<object>} Returns a promise (async function)
     * - If resolved, upload info is returned (object)
     * - If rejected, reading failed and error info is returned (object)
@@ -879,9 +884,9 @@ class Client extends EventEmitter {
 
   /**
     * Reads all symbols from target device and caches them to the metaData.symbols
-    * 
+    *
     * **WARNING** Returned object is usually very large
-    * 
+    *
     * @returns {Promise<object>} Returns a promise (async function)
     * - If resolved, symbols are returned (object)
     * - If rejected, reading failed and error info is returned (object)
@@ -972,9 +977,9 @@ class Client extends EventEmitter {
 
   /**
    * Reads and caches all data types from target PLC runtime
-   * 
+   *
     * **WARNING** Returned object is usually very large
-    * 
+    *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, data types are cached and returned (object)
    * - If rejected, reading failed and error info is returned (object)
@@ -1064,11 +1069,11 @@ class Client extends EventEmitter {
 
   /**
    * Returns full datatype as object.
-   * 
+   *
    * First searchs the local cache. If not found, reads it from PLC and caches it
-   * 
-   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',.. 
-   * 
+   *
+   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',..
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, full data type info is returned (object)
    * - If rejected, reading or parsing failed and error info is returned (object)
@@ -1095,11 +1100,11 @@ class Client extends EventEmitter {
 
   /**
    * Returns symbol information for given symbol.
-   * 
+   *
    * First searchs the local cache. If not found, reads it from PLC and caches it
-   * 
-   * @param {string} variableName - Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
-   * 
+   *
+   * @param {string} variableName - Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, symbol info is returned (object)
    * - If rejected, reading failed and error info is returned (object)
@@ -1151,9 +1156,9 @@ class Client extends EventEmitter {
 
   /**
    * Reads given PLC symbol value and parses it as Javascript object
-   * 
-   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
-   * 
+   *
+   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, symbol value and data type are returned {value, type} (object)
    * - If rejected, reading or parsing failed and error info is returned (object)
@@ -1230,11 +1235,11 @@ class Client extends EventEmitter {
 
   /**
    * Writes given PLC symbol value
-   * 
+   *
    * @param {string} variableName Variable name in the PLC - Example: 'MAIN.SomeStruct'
    * @param {object} value - Value to write
    * @param {boolean} autoFill - If true and variable type is STRUCT, given value can be just a part of it and the rest is kept the same. Otherwise they must match 1:1
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, write is successful and value and data type are returned {value, type} (object)
    * - If rejected, writing or parsing given data failed and error info is returned (object)
@@ -1350,13 +1355,13 @@ class Client extends EventEmitter {
 
   /**
    * Subscribes to variable value change notifications
-   * 
-   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
+   *
+   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
    * @param {subscriptionCallback} callback - Callback function that is called when notification is received
    * @param {number} cycleTime - How often the PLC checks for value changes (milliseconds) - Default 10 ms
    * @param {boolean} onChange - If true (default), PLC sends the notification only when value has changed. If false, the value is sent every cycleTime milliseconds
    * @param {number} initialDelay - How long the PLC waits for sending the value - default 0 ms (immediately)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, subscribing is successful and notification data is returned (object)
    * - If rejected, subscribing failed and error info is returned (object)
@@ -1393,7 +1398,7 @@ class Client extends EventEmitter {
 
   /**
    * Subscribes to variable value change notifications by index group and index offset
-   * 
+   *
    * @param {number} indexGroup - Variable index group in the PLC
    * @param {number} indexOffset - Variable index offset in the PLC
    * @param {number} size - Variable size in the PLC (enter 0xFFFFFFFF if not known)
@@ -1401,7 +1406,7 @@ class Client extends EventEmitter {
    * @param {number} cycleTime - How often the PLC checks for value changes (milliseconds) - Default 10 ms
    * @param {boolean} onChange - If true (default), PLC sends the notification only when value has changed. If false, the value is sent every cycleTime milliseconds
    * @param {number} initialDelay - How long the PLC waits for sending the value - default 0 ms (immediately)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, subscribing is successful and notification data is returned (object)
    * - If rejected, subscribing failed and error info is returned (object)
@@ -1445,9 +1450,9 @@ class Client extends EventEmitter {
 
   /**
    * Unsubscribes from the PLC variable value change notifications
-   * 
+   *
    * @param {number} notificationHandle - Notification handle for the notification
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, subscribing is successful and notification data is returned (object)
    * - If rejected, subscribing failed and error info is returned (object)
@@ -1503,7 +1508,7 @@ class Client extends EventEmitter {
 
   /**
    * Unsubscribes from all active user-added subscriptions
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, subscribing from all was successful and number of unsubscribed notifications is returned (object)
    * - If rejected, subscribing failed for some of the notifications, number of successful, number of failed and error info are returned (object)
@@ -1553,10 +1558,10 @@ class Client extends EventEmitter {
 
   /**
    * Reads (raw byte) data from PLC by given previously created variable handle
-   * 
-   * @param {object|number} handle Variable handle or object including {handle, size} to read from 
+   *
+   * @param {object|number} handle Variable handle or object including {handle, size} to read from
    * @param {number} [size] - Variable size in the PLC (bytes). **Keep as default if not known** - Default 0xFFFFFFFF
-   * 
+   *
    * @returns {Promise<Buffer>} Returns a promise (async function)
    * - If resolved, reading was successful and data is returned (Buffer)
    * - If rejected, reading failed and error info is returned (object)
@@ -1588,9 +1593,9 @@ class Client extends EventEmitter {
 
   /**
    * Reads (raw byte) data from PLC by given variable name (uses *READ_SYMVAL_BYNAME* ADS command inside)
-   * 
-   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
-   * 
+   *
+   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
+   *
    * @returns {Promise<Buffer>} Returns a promise (async function)
    * - If resolved, reading was successful and data is returned (Buffer)
    * - If rejected, reading failed and error info is returned (object)
@@ -1657,9 +1662,9 @@ class Client extends EventEmitter {
 
   /**
    * Reads (raw byte) data from PLC by given symbol info. Note: Returns Buffer
-   * 
+   *
    * @param {object} symbol - Object (PLC symbol - read for example with getSymbolInfo() method) that contains at least {indexGroup, indexOffset, size}
-   * 
+   *
    * @returns {Promise<Buffer>} Returns a promise (async function)
    * - If resolved, reading was successful and data is returned (Buffer)
    * - If rejected, reading failed and error info is returned (object)
@@ -1688,19 +1693,19 @@ class Client extends EventEmitter {
 
   /**
    * Reads (raw byte) data from PLC by given index group, index offset and size
-   * 
+   *
    * All required parameters can be read for example with getSymbolInfo() method, **see also readRawBySymbol()**
-   * 
+   *
    * @param {number} indexGroup - Variable index group in the PLC
    * @param {number} indexOffset - Variable index offset in the PLC
    * @param {number} size - Variable size in the PLC (bytes)
    * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
-   * 
+   *
    * @returns {Promise<Buffer>} Returns a promise (async function)
    * - If resolved, reading was successful and data is returned (Buffer)
    * - If rejected, reading failed and error info is returned (object)
-   * 
-  
+   *
+
    */
   readRaw(indexGroup, indexOffset, size, targetAdsPort = null) {
     return new Promise(async (resolve, reject) => {
@@ -1749,51 +1754,51 @@ class Client extends EventEmitter {
 
   /**
    * @typedef IndexGroupAndOffset
-   * 
+   *
    * @property {number} indexGroup - Index group in the PLC
    * @property {number} indexOffset - Index offset in the PLC
-   * 
+   *
    */
 
   /**
    * @typedef MultiResult
-   * 
+   *
    * @property {boolean} error - If true, command failed
    * @property {number} errorCode - If error, ADS error code
    * @property {string} errorStr - If error, ADS error as string
-   * 
+   *
    */
 
 
   /**
    * @typedef ReadRawMultiParam
-   * 
+   *
    * @property {number} indexGroup - Variable index group in the PLC
    * @property {number} indexOffset - Variable index offset in the PLC
    * @property {number} size - Variable size in the PLC (bytes)
-   * 
+   *
    */
 
   /**
    * @typedef ReadRawMultiResult
-   * 
+   *
    * @property {boolean} success - True if read was successful
    * @property {MultiErrorInfo} errorInfo - Error information (if any)
    * @property {IndexGroupAndOffset} target - Original target info
    * @property {Buffer} data - Read data as byte Buffer
-   * 
+   *
    */
 
 
 
   /**
    * Reads multiple (raw byte) data from PLC by given index group, index offset and size
-   * 
+   *
    * All required parameters can be read for example with getSymbolInfo() method, **see also readRawBySymbol()**
-   * 
+   *
    * @param {ReadRawMultiParam[]} targetArray - Targets to read from
    * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
-   * 
+   *
    * @returns {Promise<Array.<ReadRawMultiResult>>} Returns a promise (async function)
    * - If resolved, reading was successful and data is returned (object)
    * - If rejected, reading failed and error info is returned (object)
@@ -1909,17 +1914,17 @@ class Client extends EventEmitter {
 
   /**
    * Writes given byte Buffer to the target and reads result. Uses ADS command ReadWrite.
-   * 
+   *
    * @param {number} indexGroup - Index group in the PLC
    * @param {number} indexOffset - Index offset in the PLC
    * @param {number} readLength - Read data length in the PLC (bytes)
    * @param {Buffer} dataBuffer - Data to write
    * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
-   *  
+   *
    * @returns {Promise<Buffer>} Returns a promise (async function)
    * - If resolved, writing and reading was successful and data is returned (Buffer)
    * - If rejected, command failed and error info is returned (object)
-   * 
+   *
    */
   readWriteRaw(indexGroup, indexOffset, readLength, dataBuffer, targetAdsPort = null) {
     return new Promise(async (resolve, reject) => {
@@ -1978,10 +1983,10 @@ class Client extends EventEmitter {
 
   /**
    * Writes (raw byte) data to PLC by previously created variable handle
-   * 
+   *
    * @param {number} handle Variable handle to write to (created previously using createVariableHandle())
    * @param {Buffer} dataBuffer - Buffer object that contains the data (and byteLength is acceptable)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, writing was successful
    * - If rejected, writing failed and error info is returned (object)
@@ -2013,10 +2018,10 @@ class Client extends EventEmitter {
 
   /**
    * Writes (raw byte) data to PLC by given symbol info
-   * 
+   *
    * @param {object} symbol - Object (PLC symbol - read for example with getSymbolInfo() method) that contains at least {indexGroup, indexOffset}
    * @param {Buffer} dataBuffer - Buffer object that contains the data (and byteLength is acceptable)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, writing was successful
    * - If rejected, writing failed and error info is returned (object)
@@ -2048,12 +2053,12 @@ class Client extends EventEmitter {
 
   /**
    * Writes (raw byte) data to PLC with given index group and index offset
-   * 
+   *
    * @param {number} indexGroup - Variable index group in the PLC
    * @param {number} indexOffset - Variable index offset in the PLC
    * @param {Buffer} dataBuffer - Buffer object that contains the data (and byteLength is acceptable)
    * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, writing was successful
    * - If rejected, writing failed and error info is returned (object)
@@ -2112,31 +2117,31 @@ class Client extends EventEmitter {
 
   /**
    * @typedef WriteRawMultiParam
-   * 
+   *
    * @property {number} indexGroup - Variable index group in the PLC
    * @property {number} indexOffset - Variable index offset in the PLC
    * @property {Buffer} data - Buffer object that contains the data (and byteLength is acceptable)
-   * 
+   *
    */
   /**
    * @typedef WriteRawMultiResult
-   * 
+   *
    * @property {boolean} success - True if write was successful
    * @property {MultiErrorInfo} errorInfo - Error information (if any)
    * @property {IndexGroupAndOffset} target - Original target info
-   * 
+   *
    */
 
 
 
   /**
    * Writes multiple (raw byte) data to PLC by given index group and index offset
-   * 
+   *
    * All required parameters can be read for example with getSymbolInfo() method, **see also readRawBySymbol()**
-   * 
+   *
    * @param {WriteRawMultiParam[]} targetArray - Targets to write to
    * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
-   * 
+   *
    * @returns {Promise<Array.<WriteRawMultiResult>>} Returns a promise (async function)
    * - If resolved, writing was successful and data is returned (Buffer)
    * - If rejected, reading failed and error info is returned (object)
@@ -2250,20 +2255,20 @@ class Client extends EventEmitter {
 
   /**
    * @typedef CreateVariableHandleResult
-   * 
+   *
    * @property {number} handle - Received variable handle
    * @property {number} size - Received target variable size
    * @property {string} type - Received target variable type
-   * 
+   *
    */
 
   /**
-   * Creates an ADS variable handle to given PLC variable. 
-   * 
+   * Creates an ADS variable handle to given PLC variable.
+   *
    * Using the handle, read and write operations are possible to that variable with readRawByHandle() and writeRawByHandle()
-   * 
-   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
-   * 
+   *
+   * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
+   *
    * @returns {Promise<CreateVariableHandleResult>} Returns a promise (async function)
    * - If resolved, creating handle was successful and handle, size and data type are returned (object)
    * - If rejected, creating failed and error info is returned (object)
@@ -2350,24 +2355,24 @@ class Client extends EventEmitter {
 
   /**
    * @typedef CreateVariableHandleMultiResult
-   * 
+   *
    * @property {boolean} success - True if creating handle was successful
    * @property {MultiErrorInfo} errorInfo - Error information (if any)
    * @property {string} target - Target variable name
    * @property {number} handle - Returned variable handle (if successful)
-   * 
+   *
    */
 
 
   /**
-   * Creates ADS variable handles to given PLC variables. 
-   * 
+   * Creates ADS variable handles to given PLC variables.
+   *
    * Using the handle, read and write operations are possible to that variable with readRawByHandle() and writeRawByHandle()
-   * 
+   *
    * **NOTE:** Returns only handle, not data type and size like createVariableHandle()
-   * 
-   * @param {Array<string>} targetArray Variable names as array in the PLC (full path) - Example: ['MAIN.value1', 'MAIN.value2'] 
-   * 
+   *
+   * @param {Array<string>} targetArray Variable names as array in the PLC (full path) - Example: ['MAIN.value1', 'MAIN.value2']
+   *
    * @returns {Promise<Array.<CreateVariableHandleMultiResult>>} Returns a promise (async function)
    * - If resolved, command was successful and results for each handle request are returned(object)
    * - If rejected, command failed and error info is returned (object)
@@ -2494,9 +2499,9 @@ class Client extends EventEmitter {
 
   /**
    * Deletes the given previously created ADS variable handle
-   * 
+   *
    * @param {number} handle Variable handle to delete (created previously using createVariableHandle())
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, deleting handle was successful
    * - If rejected, deleting failed and error info is returned (object)
@@ -2561,18 +2566,18 @@ class Client extends EventEmitter {
 
   /**
    * @typedef DeleteVariableHandleMultiResult
-   * 
+   *
    * @property {boolean} success - True if deleting handle was successful
    * @property {MultiErrorInfo} errorInfo - Error information (if any)
    * @property {number} handle - The variable handle that was tried to be deleted
-   * 
+   *
    */
 
   /**
    * Deletes the given previously created ADS variable handles
-   * 
+   *
    * @param {Array<string>} handleArray Variable handles to be deleted as array (can also be array of objects that contain 'handle' key)
-   * 
+   *
    * @returns {Promise<Array.<DeleteVariableHandleMultiResult>>} Returns a promise (async function)
    * - If resolved, command was successful and results for each request are returned(object)
    * - If rejected, command failed and error info is returned (object)
@@ -2677,11 +2682,11 @@ class Client extends EventEmitter {
 
   /**
    * Converts given raw data (byte Buffer) to Javascript object by given dataTypeName
-   * 
-   * 
+   *
+   *
    * @param {Buffer} rawData - A Buffer containing valid data for given data type
-   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',.. 
-   * 
+   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',..
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, Javascript object / variable is returned
    * - If rejected, parsing failed and error info is returned (object)
@@ -2735,13 +2740,13 @@ class Client extends EventEmitter {
 
   /**
    * Converts given Javascript object/variable to raw Buffer data by given dataTypeName
-   * 
-   * 
+   *
+   *
    * @param {object} value - Javacript object or variable that represents dataTypeName
-   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',.. 
-   * @param {boolean} autoFill - If true and variable type is STRUCT, given value can be just a part of it and the rest is **SET TO ZEROS**. 
+   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',..
+   * @param {boolean} autoFill - If true and variable type is STRUCT, given value can be just a part of it and the rest is **SET TO ZEROS**.
    * Otherwise they must match 1:1. Note: can also be 'internal' in internal use (no additional error message data)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, Javascript object / variable is returned
    * - If rejected, parsing failed and error info is returned (object)
@@ -2814,10 +2819,10 @@ class Client extends EventEmitter {
 
   /**
    * Returns empty Javascript object that represents given dataTypeName
-   * 
-   * 
-   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',.. 
-   * 
+   *
+   *
+   * @param {string} dataTypeName - Data type name in the PLC - Example: 'ST_SomeStruct', 'REAL',..
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, Javascript object / variable is returned
    * - If rejected, parsing failed and error info is returned (object)
@@ -2862,16 +2867,16 @@ class Client extends EventEmitter {
 
 
   /**
-   * Sends a WriteControl ADS command to the given ADS port. 
+   * Sends a WriteControl ADS command to the given ADS port.
    * WriteControl can be used to start/stop PLC, set TwinCAT system to run/config and so on
-   * 
+   *
    * **NOTE: Commands will fail if already in requested state**
-   * 
+   *
    * @param {number} adsPort - Target ADS port (TC3 runtime 1: 851, system manager: 10000 and so on)
    * @param {number} adsState - ADS state to be set (see ADS.ADS_STATE for different values)
    * @param {number} [deviceState] - device state to be set (usually 0) - Default: 0
    * @param {Buffer} [data] - Additional data to be send (Buffer object - usually empty) - Default: none
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -2926,11 +2931,11 @@ class Client extends EventEmitter {
 
   /**
    * Starts the PLC runtime from settings.targetAdsPort or given ads port
-   * 
+   *
    * **WARNING:** Make sure the system is ready to start
-   * 
+   *
    * @param {number} adsPort - Target ADS port, for example 851 for TwinCAT 3 PLC runtime 1 (default: this.settings.targetAdsPort)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -2966,11 +2971,11 @@ class Client extends EventEmitter {
 
   /**
    * Stops the PLC runtime from settings.targetAdsPort or given ads port
-   * 
+   *
    * **WARNING:** Make sure the system is ready to stop
-   * 
+   *
    * @param {number} adsPort - Target ADS port, for example 851 for TwinCAT 3 PLC runtime 1 (default: this.settings.targetAdsPort)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -3007,11 +3012,11 @@ class Client extends EventEmitter {
 
   /**
    * Restarts the PLC runtime from settings.targetAdsPort or given ads port
-   * 
+   *
    * **WARNING:** Make sure the system is ready to stop and start
-   * 
+   *
    * @param {number} adsPort - Target ADS port, for example 851 for TwinCAT 3 PLC runtime 1 (default: this.settings.targetAdsPort)
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -3048,9 +3053,9 @@ class Client extends EventEmitter {
 
   /**
    * Sets the TwinCAT system (system manager) to start/run mode (green TwinCAT icon)
-   * 
+   *
    * **WARNING:** Make sure the system is ready to stop and start
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -3083,9 +3088,9 @@ class Client extends EventEmitter {
 
   /**
    * Sets the TwinCAT system (system manager) to config mode (blue TwinCAT icon)
-   * 
+   *
    * **WARNING:** Make sure the system is ready to stop
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -3119,11 +3124,11 @@ class Client extends EventEmitter {
 
 
   /**
-   * Restarts TwinCAT system (system manager) for software update etc. 
+   * Restarts TwinCAT system (system manager) for software update etc.
    * Internally same as setSystemManagerToRun()
-   * 
+   *
    * **WARNING:** Make sure the system is ready to stop and start
-   * 
+   *
    * @returns {Promise<object>} Returns a promise (async function)
    * - If resolved, command was successful
    * - If rejected, command failed error info is returned (object)
@@ -3143,22 +3148,22 @@ class Client extends EventEmitter {
 
   /**
    * @typedef RpcMethodResult
-   * 
+   *
    * @property {object} returnValue - The return value of the method
    * @property {object} outputs - Object containing all VAR_OUTPUT variables of the method
-   * 
+   *
    */
 
 
   /**
-   * Invokes (calls) a function block method from PLC with given parameters. 
+   * Invokes (calls) a function block method from PLC with given parameters.
    * Returns the function result as Javascript object.
    * **NOTE:** The method must have {attribute 'TcRpcEnable'} above its METHOD definiton
-   * 
-   * @param {string} variableName Function block path in the PLC (full path) - Example: 'MAIN.FunctionBlock' 
+   *
+   * @param {string} variableName Function block path in the PLC (full path) - Example: 'MAIN.FunctionBlock'
    * @param {string} methodName Method name to invoke
    * @param {object} parameters Method parameters as object - Example: {param1: value, param2: value}
-   * 
+   *
    * @returns {Promise<RpcMethodResult>} Returns a promise (async function)
    * - If resolved, invoking was successful and method return data (return value and outputs) is returned
    * - If rejected, command failed error info is returned (object)
@@ -3340,7 +3345,7 @@ class Client extends EventEmitter {
 
   /**
    * Sends an ADS command including provided data
-   * As default the command is sent to target provided in Client settings. 
+   * As default the command is sent to target provided in Client settings.
    * However, the target can also be given
    *
    * @param {number} adsCommand ADS command to send (See ADS.ADS_COMMAND)
@@ -3361,7 +3366,7 @@ class Client extends EventEmitter {
 
   /**
    * **Helper:** Converts byte array (Buffer) to AmsNetId string
-   * 
+   *
    * @param {Buffer|array} byteArray Buffer/array that contains AmsNetId bytes
    * @returns {string} AmsNetId as string
    */
@@ -3371,7 +3376,7 @@ class Client extends EventEmitter {
 
   /**
    * **Helper:** Converts AmsNetId string to byte array
-   * 
+   *
    * @param {string} byteArray String that represents an AmsNetId
    * @returns {array} AmsNetId as array
    */
@@ -3390,9 +3395,9 @@ class Client extends EventEmitter {
 
 /**
  * Own exception class used for Client errors
- * 
+ *
  * Derived from Error but added innerException and ADS error information
- * 
+ *
  * @class
  */
 class ClientException extends Error {
@@ -3401,12 +3406,12 @@ class ClientException extends Error {
   /**
    * @typedef AdsErrorInfo
    * @property {string} adsErrorType Type of the error (AMS error, ADS error)
-   * 
+   *
    * - AMS error: Something went wrong with the routing, the command was unknown etc.
    * - ADS error: The command failed
    * @property {number} adsErrorCode ADS error code
    * @property {string} adsErrorStr The description/message of ADS error code [https://infosys.beckhoff.com/english.php?content=../content/1033/tf6610_tc3_s5s7communication/36028797393240971.html&id=](https://infosys.beckhoff.com/english.php?content=../content/1033/tf6610_tc3_s5s7communication/36028797393240971.html&id=)
-   * 
+   *
    */
 
   /**
@@ -3440,39 +3445,39 @@ class ClientException extends Error {
       this.stack = (new Error(message)).stack
     }
 
-    /** 
+    /**
      * Error class name
-     * @type {string} 
+     * @type {string}
      */
     this.name = this.constructor.name
-    /** 
-     * The method that threw the error 
+    /**
+     * The method that threw the error
      * @type {string}
      */
     this.sender = sender
-    /** 
-     * If true, this error is an AMS/ADS error 
-     * @type {boolean} 
+    /**
+     * If true, this error is an AMS/ADS error
+     * @type {boolean}
      */
     this.adsError = false
-    /** 
+    /**
      * If adsError = true, this contains error information
-     * @type {AdsErrorInfo} 
+     * @type {AdsErrorInfo}
      */
     this.adsErrorInfo = null
-    /** 
-     * All other metadata that is passed to the error class 
-     * @type {any} 
+    /**
+     * All other metadata that is passed to the error class
+     * @type {any}
      */
     this.metaData = null
-    /** 
-     * Senders and error messages of inner exceptions 
-     * @type {string[]} 
+    /**
+     * Senders and error messages of inner exceptions
+     * @type {string[]}
      */
     this.errorTrace = []
-    /** 
-     * Function to retrieve the inner exception of this error 
-     * @type {function} 
+    /**
+     * Function to retrieve the inner exception of this error
+     * @type {function}
      */
     this.getInnerException = null
 
@@ -3558,9 +3563,9 @@ class ClientException extends Error {
 
 /**
  * Libray internal methods are documented inside a virtual namespace *_LibraryInternals*.
- * 
+ *
  * These methods **are not meant for end-user** and they are not available through module exports.
- * 
+ *
  * @namespace _LibraryInternals
  */
 
@@ -3568,13 +3573,13 @@ class ClientException extends Error {
 
 /**
  * Registers a new ADS port from used AMS router
- * 
- * Principe is from .NET library TwinCAT.Ads.dll 
- * 
+ *
+ * Principe is from .NET library TwinCAT.Ads.dll
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, registering a port was successful and local AmsNetId and ADS port are returned (object)
  * - If rejected, registering failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _registerAdsPort() {
@@ -3665,12 +3670,12 @@ function _registerAdsPort() {
 
 /**
  * Unregisters previously registered ADS port from AMS router
- * 
- * Principe is from .NET library TwinCAT.Ads.dll 
- * 
+ *
+ * Principe is from .NET library TwinCAT.Ads.dll
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - In all cases this is resolved, ADS port is unregistered
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _unregisterAdsPort() {
@@ -3807,7 +3812,7 @@ function _unregisterAdsPort() {
 
 /**
  * Event listener for socket errors. Just calling the _onConnectionLost handler.
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _onSocketError(err) {
@@ -3822,9 +3827,9 @@ async function _onSocketError(err) {
 
 /**
  * Called when connection to the remote is lost
- * 
+ *
  * @param {boolean} socketFailure - If true, connection was lost due socket/tcp problem -> Just destroy the socket
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _onConnectionLost(socketFailure = false) {
@@ -3908,9 +3913,9 @@ async function _onConnectionLost(socketFailure = false) {
 
 /**
  * Initializes internal subscriptions and caches symbols/datatypes if required
- *  
+ *
  * @throws {Error} If failed, error is thrown
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _reInitializeInternals() {
@@ -3927,7 +3932,7 @@ async function _reInitializeInternals() {
   if (!this.settings.disableSymbolVersionMonitoring) await this.readSymbolVersion()
   if (!this.settings.disableSymbolVersionMonitoring) await _subscribeToSymbolVersionChanges.call(this)
 
-  //Cache data 
+  //Cache data
   if (this.settings.readAndCacheSymbols || this.metaData.allSymbolsCached) await this.readAndCacheSymbols()
   if (this.settings.readAndCacheDataTypes || this.metaData.allDataTypesCached) await this.readAndCacheDataTypes()
 
@@ -3943,9 +3948,9 @@ async function _reInitializeInternals() {
 
 /**
  * Reinitializes user-made subscriptions (not internal ones)
- *  
+ *
  * @throws {Error} If failed, array of errors is thrown
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _reInitializeSubscriptions(previousSubscriptions) {
@@ -3993,11 +3998,11 @@ async function _reInitializeSubscriptions(previousSubscriptions) {
 
 /**
  * Writes given data buffer to the socket
- * 
+ *
  * Just a simple wrapper for socket.write()
- * 
+ *
  * @param data Buffer to write
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _socketWrite(data) {
@@ -4020,9 +4025,9 @@ function _socketWrite(data) {
 
 /**
  * Event listener for socket.on('data')
- * 
+ *
  * Adds received data to the receive buffer
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _socketReceive(data) {
@@ -4051,9 +4056,9 @@ function _socketReceive(data) {
 
 /**
  * Subscribes to symbol version changes
- * 
+ *
  * Symbol version is changed for example during PLC program update
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _subscribeToSymbolVersionChanges() {
@@ -4087,9 +4092,9 @@ function _subscribeToSymbolVersionChanges() {
 
 /**
  * Called when PLC symbol version is changed (_subscribeToSymbolVersionChanges())
- * 
+ *
  * @param data Buffer that contains the new symbol version
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _onSymbolVersionChanged(data) {
@@ -4161,9 +4166,9 @@ async function _onSymbolVersionChanged(data) {
 
 
 /**
- * Starts a poller that reads system manager state to see 
+ * Starts a poller that reads system manager state to see
  * if connection is ok and if the manager state has changed
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _systemManagerStatePoller() {
@@ -4227,7 +4232,7 @@ function _systemManagerStatePoller() {
 
 /**
  * Subscribes to PLC runtime state changes
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _subcribeToPlcRuntimeStateChanges() {
@@ -4266,9 +4271,9 @@ function _subcribeToPlcRuntimeStateChanges() {
 /**
  * Called when local AMS router status has changed (Router notification received)
  * For example router state changes when local TwinCAT changes from Config to Run state and vice-versa
- * 
+ *
  * @param data Buffer that contains the new router state
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _onRouterStateChanged(data) {
@@ -4306,7 +4311,7 @@ async function _onRouterStateChanged(data) {
 
 /**
  * Called when device status has changed (_subcribeToPlcRuntimeStateChanges)
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _onPlcRuntimeStateChanged(data, sub) {
@@ -4349,20 +4354,20 @@ async function _onPlcRuntimeStateChanged(data, sub) {
  * @property {number} transmissionMode - How the PLC checks for value changes (Cyclic or on-change - ADS.ADS_TRANS_MODE)
  * @property {number} maximumDelay - When subscribing, a notification is sent after this time even if no changes (milliseconds)
  * @property {number} cycleTime - How often the PLC checks for value changes (milliseconds)
- * @property {number} [targetAdsPort] - Target ADS port, optional. 
+ * @property {number} [targetAdsPort] - Target ADS port, optional.
  * @property {boolean} [internal] - If true, the subscription is library internal (e.g. symbol version change notification)
  */
 /**
  * Subscribes to variable value change notifications
- * 
+ *
  * @param {(string|object)} target Variable name in the PLC (full path, example: 'MAIN.SomeStruct.SomeValue') OR symbol object containing {indexGroup, indexOffset, size}
  * @param {subscriptionCallback} callback - Callback function that is called when notification is received
  * @param {subscriptionSettings} settings - Settings object for subscription
- * 
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, subscribing is successful and notification data is returned (object)
  * - If rejected, subscribing failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _subscribe(target, callback, settings) {
@@ -4418,7 +4423,7 @@ function _subscribe(target, callback, settings) {
     data.writeUInt32LE(settings.transmissionMode, pos)
     pos += 4
 
-    //16..19 Maximum delay (ms) - When subscribing, a notification is sent after this time even if no changes 
+    //16..19 Maximum delay (ms) - When subscribing, a notification is sent after this time even if no changes
     data.writeUInt32LE(settings.maximumDelay * 10000, pos)
     pos += 4
 
@@ -4500,11 +4505,11 @@ function _subscribe(target, callback, settings) {
 
 /**
  * Unsubscribes all internal (library) subscriptions
- * 
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, subscribing from all was successful and number of unsubscribed notifications is returned (object)
  * - If rejected, subscribing failed for some of the notifications, number of successful, number of failed and error info are returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _unsubscribeAllInternals() {
@@ -4549,11 +4554,11 @@ function _unsubscribeAllInternals() {
 
 /**
  * Parses data type information from given (byte) Buffer. Recursively parses all sub types also
- * 
+ *
  * @param {Buffer} data - Buffer object that contains the data
- * 
+ *
  * @returns {object} Returns the data type information as object
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _parseDataType(data) {
@@ -4890,11 +4895,11 @@ async function _parseDataType(data) {
 
 /**
  * Parses symbol information from given (byte) Buffer
- * 
+ *
  * @param {Buffer} data - Buffer object that contains the data **Note:** The data should not contain the first 4 bytes of symbol entry data length, it should be already parsed
- * 
+ *
  * @returns {object} Returns the symbol information as object
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseSymbolInfo(data) {
@@ -5023,13 +5028,13 @@ function _parseSymbolInfo(data) {
 
 /**
  * Reads symbol information from PLC for given variable
- * 
- * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue' 
- * 
+ *
+ * @param {string} variableName Variable name in the PLC (full path) - Example: 'MAIN.SomeStruct.SomeValue'
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, reading was successful and parsed symbol information is returned (object)
  * - If rejected, reading failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _readSymbolInfo(variableName) {
@@ -5083,20 +5088,20 @@ function _readSymbolInfo(variableName) {
 
 /**
  * Recursively parses given object to (byte) Buffer for PLC using data type information
- * 
+ *
  * @param {object} value Object containing the data
  * @param {object} dataType Data type information object, that corresponds to the given value and the PLC type
  * @param {string} [objectPathStr] **DO NOT ASSIGN MANUALLY** Object path that is being parsed (eg. 'SomeStruct.InnerStruct.SomeValue') for debugging.
- * @param {boolean} [isArraySubItem] **DO NOT ASSIGN MANUALLY** True if the object that is being parsed is an array subitem 
- * 
+ * @param {boolean} [isArraySubItem] **DO NOT ASSIGN MANUALLY** True if the object that is being parsed is an array subitem
+ *
  * @returns {Buffer} Returns a Buffer that contains the data ready for PLC
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseJsObjectToBuffer(value, dataType, objectPathStr = '', isArraySubItem = false) {
   let buffer = Buffer.alloc(0)
 
-  //Struct or array subitem - Go through each subitem 
+  //Struct or array subitem - Go through each subitem
   if ((dataType.arrayData.length === 0 || isArraySubItem) && dataType.subItems.length > 0) {
     buffer = Buffer.alloc(dataType.offset + dataType.size)
 
@@ -5207,11 +5212,11 @@ function _parseJsObjectToBuffer(value, dataType, objectPathStr = '', isArraySubI
 
 /**
  * Parses given javascript variable to (byte) Buffer for PLC
- * 
+ *
  * @param {object} value Variable containing the data
  * @param {object} dataType Data type information object, that corresponds to the given value and the PLC type
  * @param {Buffer} dataBuffer Target Buffer where that data is saved (used as reference so is the output also)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseJsVariableToPlc(value, dataType, dataBuffer) {
@@ -5250,13 +5255,13 @@ function _parseJsVariableToPlc(value, dataType, dataBuffer) {
 
 /**
  * Recursively parses given (byte) Buffer to javascript object using data type information
- * 
+ *
  * @param {Buffer} dataBuffer Buffer that contains the PLC data
  * @param {object} dataType Data type information object, that corresponds to the given value and the PLC type
- * @param {boolean} [isArraySubItem] **DO NOT ASSIGN MANUALLY** True if the buffer that is being parsed is an array subitem 
- * 
+ * @param {boolean} [isArraySubItem] **DO NOT ASSIGN MANUALLY** True if the buffer that is being parsed is an array subitem
+ *
  * @returns {object} Parsed data as Javascript object
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parsePlcDataToObject(dataBuffer, dataType, isArraySubItem = false) {
@@ -5266,7 +5271,7 @@ function _parsePlcDataToObject(dataBuffer, dataType, isArraySubItem = false) {
   if ((dataType.arrayData.length === 0 || isArraySubItem) && dataType.subItems.length > 0) {
     output = {}
 
-    //First skip the offset 
+    //First skip the offset
     dataBuffer = dataBuffer.slice(dataType.offset)
 
     for (const subItem of dataType.subItems) {
@@ -5334,12 +5339,12 @@ function _parsePlcDataToObject(dataBuffer, dataType, isArraySubItem = false) {
 
 /**
  * Parses javascript variable from given (byte) Buffer using data type information
- * 
+ *
  * @param {Buffer} dataBuffer Target Buffer where that data is saved (used as reference so is the output also)
  * @param {object} dataType Data type information object, that corresponds to the given value and the PLC type
- * 
+ *
  * @returns {object} Parsed variable
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parsePlcVariableToJs(dataBuffer, dataType) {
@@ -5371,13 +5376,13 @@ function _parsePlcVariableToJs(dataBuffer, dataType) {
 
 /**
  * Reads data type information from PLC for given data type
- * 
- * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc. 
- * 
+ *
+ * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc.
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, reading was successful and parsed data type information is returned (object)
  * - If rejected, reading failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _readDataTypeInfo(dataTypeName) {
@@ -5430,15 +5435,15 @@ function _readDataTypeInfo(dataTypeName) {
 
 /**
   * Parses full data type information recursively and returns it as object
-  * 
-  * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc. 
+  *
+  * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc.
   * @param {boolean} [firstLevel] **DO NOT ASSIGN MANUALLY** True if this is the first recursion / top level of the data type
   * @param {number} [size] - The size of the data type. This is used if we are connected to older runtime that doesn't provide base data type info -> we need to know the size at least in some cases
-  * 
+  *
   * @returns {Promise<object>} Returns a promise (async function)
   * - If resolved, data type is returned (object)
   * - If rejected, reading failed and error info is returned (object)
-* 
+*
 * @memberof _LibraryInternals
   */
 function _getDataTypeRecursive(dataTypeName, firstLevel = true, size = null) {
@@ -5613,17 +5618,17 @@ function _getDataTypeRecursive(dataTypeName, firstLevel = true, size = null) {
 
 
 /**
- * Returns data type information for a data type. 
+ * Returns data type information for a data type.
  * NOTE: Returns only the upmost level info, not subitems of subitems (not recursively for the whole data type). Use _getDataTypeRecursive() to receive the whole type
- * 
+ *
  * First looks in the cache, if not found, reads it from the PLC
- * 
- * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc. 
- * 
+ *
+ * @param {string} dataTypeName - Data type name in the PLC - Example: 'INT', 'E_SomeEnum', 'ST_SomeStruct' etc.
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, data type is returned (object)
  * - If rejected, reading failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _getDataTypeInfo(dataTypeName) {
@@ -5667,9 +5672,9 @@ function _getDataTypeInfo(dataTypeName) {
 
 /**
  * Checks received data buffer for full AMS packets. If full packet is found, it is parsed and handled.
- * 
+ *
  * Calls itself recursively if multiple packets available. Added also setImmediate calls to prevent event loop from blocking
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _checkReceivedData() {
@@ -5710,9 +5715,9 @@ function _checkReceivedData() {
 
 /**
  * Parses an AMS/TCP packet from given (byte) Buffer and then handles it
- * 
+ *
  * @param {Buffer} data Buffer that contains data for a single full AMS/TCP packet
- * 
+ *
  * @memberof _LibraryInternals
  */
 async function _parseAmsTcpPacket(data) {
@@ -5745,11 +5750,11 @@ async function _parseAmsTcpPacket(data) {
 
 /**
  * Parses an AMS/TCP header from given (byte) Buffer
- * 
+ *
  * @param {Buffer} data Buffer that contains data for a single full AMS/TCP packet
- * 
+ *
  * @returns {object} Object {amsTcp, data}, where amsTcp is the parsed header and data is rest of the data
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseAmsTcpHeader(data) {
@@ -5767,7 +5772,7 @@ function _parseAmsTcpHeader(data) {
   amsTcp.dataLength = data.readUInt32LE(pos)
   pos += 4
 
-  //Remove AMS/TCP header from data  
+  //Remove AMS/TCP header from data
   data = data.slice(ADS.AMS_TCP_HEADER_LENGTH)
 
   //If data length is less than AMS_HEADER_LENGTH,
@@ -5789,11 +5794,11 @@ function _parseAmsTcpHeader(data) {
 
 /**
  * Parses an AMS header from given (byte) Buffer
- * 
+ *
  * @param {Buffer} data Buffer that contains data for a single AMS packet (without AMS/TCP header)
- * 
+ *
  * @returns {object} Object {ams, data}, where ams is the parsed AMS header and data is rest of the data
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseAmsHeader(data) {
@@ -5845,7 +5850,7 @@ function _parseAmsHeader(data) {
   ams.invokeId = data.readUInt32LE(pos)
   pos += 4
 
-  //Remove AMS header from data  
+  //Remove AMS header from data
   data = data.slice(ADS.AMS_HEADER_LENGTH)
 
   //ADS error
@@ -5871,11 +5876,11 @@ function _parseAmsHeader(data) {
 
 /**
  * Parses ADS data from given (byte) Buffer. Uses packet.ams to determine the ADS command
- * 
+ *
  * @param {Buffer} data Buffer that contains data for a single ADS packet (without AMS/TCP header and AMS header)
- * 
+ *
  * @returns {object} Object that contains the parsed ADS data
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseAdsData(packet, data) {
@@ -6065,9 +6070,9 @@ function _parseAdsData(packet, data) {
 
 /**
  * Handles the parsed AMS/TCP packet and actions/callbacks etc. related to it.
- * 
+ *
  * @param {object} packet Fully parsed AMS/TCP packet, includes AMS/TCP header and if available, also AMS header and ADS data
- *  * 
+ *  *
  * @memberof _LibraryInternals
  */
 async function _onAmsTcpPacketReceived(packet) {
@@ -6162,9 +6167,9 @@ async function _onAmsTcpPacketReceived(packet) {
 
 /**
  * Handles incoming ADS commands
- * 
+ *
  * @param {object} packet Fully parsed AMS/TCP packet, includes AMS/TCP header, AMS header and ADS data
- *  * 
+ *  *
  * @memberof _LibraryInternals
  */
 async function _onAdsCommandReceived(packet) {
@@ -6242,11 +6247,11 @@ async function _onAdsCommandReceived(packet) {
 
 /**
  * Parses received ADS notification data (stamps) from given (byte) Buffer
- * 
+ *
  * @param {Buffer} data Buffer that contains ADS notification stamp data
- * 
+ *
  * @returns {object} Object that contains the parsed ADS notification
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _parseAdsNotification(data) {
@@ -6312,16 +6317,16 @@ function _parseAdsNotification(data) {
 
 /**
  * Sends an ADS command with given data to the PLC
- * 
+ *
  * @param {number} adsCommand - ADS command to send (see ADS.ADS_COMMAND)
  * @param {Buffer} adsData - Buffer object that contains the data to send
  * @param {number} [targetAdsPort] - Target ADS port (optional) - default is this.settings.targetAdsPort
  * @param {string} [targetAmsNetId] - Target AmsNetID (optional) - default is this.settings.targetAmsNetId
- * 
+ *
  * @returns {Promise<object>} Returns a promise (async function)
  * - If resolved, command was sent successfully and response was received. The received reponse is parsed and returned (object)
  * - If rejected, sending, receiving or parsing failed and error info is returned (object)
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _sendAdsCommand(adsCommand, adsData, targetAdsPort = null, targetAmsNetId = null) {
@@ -6402,7 +6407,7 @@ function _sendAdsCommand(adsCommand, adsData, targetAdsPort = null, targetAmsNet
       }, this.settings.timeoutDelay, this)
     }
 
-    //Write the data 
+    //Write the data
     try {
       _socketWrite.call(this, request)
     } catch (err) {
@@ -6420,11 +6425,11 @@ function _sendAdsCommand(adsCommand, adsData, targetAdsPort = null, targetAmsNet
 
 /**
  * Creates an AMS/TCP request from given packet
- * 
+ *
  * @param {object} packet Object containing the full AMS/TCP packet
- * 
+ *
  * @returns {Buffer} Full created AMS/TCP request as a (byte) Buffer
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _createAmsTcpRequest(packet) {
@@ -6456,11 +6461,11 @@ function _createAmsTcpRequest(packet) {
 
 /**
  * Creates an AMS header from given packet
- * 
+ *
  * @param {object} packet Object containing the full AMS/TCP packet
- * 
+ *
  * @returns {Buffer} Created AMS header as a (byte) Buffer
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _createAmsHeader(packet) {
@@ -6523,12 +6528,12 @@ function _createAmsHeader(packet) {
 
 /**
  * Creates an AMS/TCP header from given packet and AMS header
- * 
+ *
  * @param {object} packet Object containing the full AMS/TCP packet
  * @param {Buffer} amsHeader Buffer containing the previously created AMS header
- * 
+ *
  * @returns {Buffer} Created AMS/TCP header as a (byte) Buffer
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _createAmsTcpHeader(packet, amsHeader) {
@@ -6561,9 +6566,9 @@ function _createAmsTcpHeader(packet, amsHeader) {
 
 /**
  * Writes given message to console if settings.hideConsoleWarnings is false
- * 
- * @param {string} str Message to console.log() 
- * 
+ *
+ * @param {string} str Message to console.log()
+ *
  * @memberof _LibraryInternals
  */
 function _console(str) {
@@ -6585,18 +6590,18 @@ function _console(str) {
 
 /**
  * **Helper:** Marges objects together recursively. Used for example at writeSymbol() to combine active values and new (uncomplete) object values
- * 
+ *
  * Based on https://stackoverflow.com/a/34749873/8140625 by Salakar and https://stackoverflow.com/a/49727784/8140625
- * 
- * Later modified to work with in both case-sensitive and case-insensitive ways (as the PLC is case-insensitive too). 
+ *
+ * Later modified to work with in both case-sensitive and case-insensitive ways (as the PLC is case-insensitive too).
  * Also fixed isObjectOrArray to return true only when input is object literal {} or array (https://stackoverflow.com/a/16608074/8140625)
- * 
+ *
  * @param {boolean} isCaseSensitive True = Object keys are merged case-sensitively --> target['key'] !== target['KEY'], false = case-insensitively
  * @param {object} target Target object to copy data to
  * @param {...object} sources Source objects to copy data from
- * 
+ *
  * @returns {object} Merged object
- * 
+ *
  * @memberof _LibraryInternals
  */
 
@@ -6681,11 +6686,11 @@ function _deepMergeObjects(isCaseSensitive, target, ...sources) {
 
 /**
  * **Helper:** Trims the given PLC string until en mark (\0, 0 byte) is found
- * 
+ *
  * @param {string} plcString String to trim
- * 
+ *
  * @returns {string} Trimmed string
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _trimPlcString(plcString) {
@@ -6707,11 +6712,11 @@ function _trimPlcString(plcString) {
 
 /**
  * **Helper:** Converts byte array (Buffer) to AmsNetId string
- * 
+ *
  * @param {Buffer|array} byteArray Buffer/array that contains AmsNetId bytes
- * 
+ *
  * @returns {string} AmsNetId as string
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _byteArrayToAmsNetIdStr(byteArray) {
@@ -6723,11 +6728,11 @@ function _byteArrayToAmsNetIdStr(byteArray) {
 
 /**
  * **Helper:** Converts AmsNetId string to byte array
- * 
+ *
  * @param {string} byteArray String that represents an AmsNetId
- * 
+ *
  * @returns {array} AmsNetId as array
- * 
+ *
  * @memberof _LibraryInternals
  */
 function _amsNetIdStrToByteArray(str) {
