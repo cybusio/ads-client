@@ -74,7 +74,7 @@ class Client extends EventEmitter {
    * @property {number} [connectionDownDelay=5000] - Time (milliseconds) after no successful reading of the system manager state the connection is determined to be lost - Optional (**default**: 5000 ms)
    * @property {boolean} [allowHalfOpen=false] - If true, connect() is successful even if no PLC runtime is found (but target and system manager are available) - Can be useful if it's ok that after connect() the PLC runtime is not immediately available (example: connecting before uploading PLC code and reading data later) - WARNING: If true, reinitializing subscriptions might fail after connection loss.
    * @property {boolean} [disableBigInt=false] - If true, 64 bit integer PLC variables are kept as Buffer objects instead of converting to Javascript BigInt variables (JSON.strigify and libraries that use it have no BigInt support)
-   * @property {boolean} [disableSystemManager=true] - If true, System manager support is disabled - Optional (**default**: true)
+   * @property {boolean} [disableSystemManagerPolling=false] - If true, System manager support is disabled - Optional (**default**: false)
    */
 
 
@@ -104,7 +104,7 @@ class Client extends EventEmitter {
       connectionDownDelay: 5000,
       allowHalfOpen: false,
       disableBigInt: false,
-      disableSystemManager: true
+      disableSystemManagerPolling: false
     }
   }
 
@@ -3398,22 +3398,23 @@ function _connect(isReconnecting = false) {
       this._internals.socketErrorHandler = _onSocketError.bind(this)
       socket.on('error', this._internals.socketErrorHandler)
 
-      try {
-        //Try to read system manager state - If it's OK, connection is successful to the target
-        await this.readSystemManagerState()
-        _systemManagerStatePoller.call(this)
-
-      } catch (err) {
+      if (!this.settings.disableSystemManagerPolling) {
         try {
-          await _disconnect.call(this, false, isReconnecting)
+          //Try to read system manager state - If it's OK, connection is successful to the target
+          await this.readSystemManagerState()
+          _systemManagerStatePoller.call(this)
+
         } catch (err) {
-          debug(`_connect(): Reading target system manager failed -> Connection closed`)
+          try {
+            await _disconnect.call(this, false, isReconnecting)
+          } catch (err) {
+            debug(`_connect(): Reading target system manager failed -> Connection closed`)
+          }
+          this.connection.connected = false
+
+          return reject(new ClientException(this, '_connect()', `Connection failed: ${err.message}`, err))
         }
-        this.connection.connected = false
-
-        return reject(new ClientException(this, '_connect()', `Connection failed: ${err.message}`, err))
       }
-
 
       try {
         await _reInitializeInternals.call(this)
